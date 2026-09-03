@@ -959,32 +959,53 @@ def analyze_source(source: str) -> ConditionalTree:
     return analyze_tree(parse_source(source))
 
 
-def _normalized_source_condition(branch: ConditionalBranch) -> str | None:
-    if branch.expression is None:
-        return None
-    return format_expression(branch.expression)
+def _expression_comparison_key(expression: Expression) -> tuple[object, ...]:
+    """Return an order- and association-insensitive structural key."""
+
+    if isinstance(expression, Constant):
+        return ("constant", expression.value)
+    if isinstance(expression, Variable):
+        return ("variable", expression.name)
+    if isinstance(expression, Predicate):
+        return ("predicate", expression.text)
+    if isinstance(expression, Negation):
+        return ("not", _expression_comparison_key(expression.operand))
+
+    operator = "and" if isinstance(expression, Conjunction) else "or"
+    expression_type = type(expression)
+    operands: list[Expression] = []
+
+    def collect(item: Expression) -> None:
+        if isinstance(item, expression_type):
+            for operand in item.operands:
+                collect(operand)
+        else:
+            operands.append(item)
+
+    collect(expression)
+    return (
+        operator,
+        tuple(sorted(_expression_comparison_key(item) for item in operands)),
+    )
+
+
+def _expressions_differ(
+    left: Expression | None, right: Expression | None
+) -> bool:
+    if left is None or right is None:
+        return left is not right
+    return _expression_comparison_key(left) != _expression_comparison_key(right)
 
 
 def _branch_differs_from_source(branch: ConditionalBranch) -> bool:
     """Return whether simplification or context changes the source condition."""
 
     assert branch.analysis is not None
-    source = _normalized_source_condition(branch)
-    if source is None:
+    if branch.expression is None:
         return False
-    simplified = (
-        format_expression(branch.analysis.simplified)
-        if branch.analysis.simplified is not None
-        else None
-    )
-    contextual = (
-        format_expression(branch.analysis.contextual)
-        if branch.analysis.contextual is not None
-        else None
-    )
     return (
-        source != simplified
-        or source != contextual
+        _expressions_differ(branch.expression, branch.analysis.simplified)
+        or _expressions_differ(branch.expression, branch.analysis.contextual)
     )
 
 
@@ -1141,7 +1162,9 @@ def _text_lines(
                 simplified_line = f"{'  ' * (depth + 1)}simplified: {simplified}"
                 simplified_color = (
                     "green"
-                    if _normalized_source_condition(branch) != simplified
+                    if _expressions_differ(
+                        branch.expression, branch.analysis.simplified
+                    )
                     else "gray"
                 )
                 yield _colored(simplified_line, simplified_color, color)
