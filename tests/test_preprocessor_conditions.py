@@ -156,6 +156,24 @@ def test_ifdef_ifndef_and_defined_forms():
     assert conditions.format_expression(branch(tree, group=1).expression) == "!OTHER"
 
 
+def test_c23_elifdef_and_elifndef_forms():
+    tree = conditions.analyze_source(
+        """
+#if PRIMARY
+#elifdef FALLBACK
+#elifndef DISABLED
+#endif
+"""
+    )
+
+    branches = tree.groups[0].branches
+    assert [item.directive for item in branches] == ["if", "elifdef", "elifndef"]
+    assert branches[1].expression == conditions.Variable("FALLBACK")
+    assert branches[2].expression == conditions.Negation(
+        conditions.Variable("DISABLED")
+    )
+
+
 def test_value_expression_becomes_opaque_predicate_without_losing_boolean_shape():
     expression = conditions.parse_expression("VERSION >= 4 && defined(FOO)")
 
@@ -267,6 +285,7 @@ def test_locationless_expression_error_gets_directive_line_prefix():
         ("#if A &&\n#endif\n", "expected an operand"),
         ("#if (A || B\n#endif\n", r"expected.*'\)'"),
         ("#if 08\n#endif\n", "invalid integer"),
+        ("#if A\n#elifdef B C\n#endif\n", "expects exactly one macro name"),
     ],
 )
 def test_malformed_input_has_a_clear_diagnostic(source, message):
@@ -329,3 +348,85 @@ def test_cli_reports_non_utf8_input_without_traceback(tmp_path):
     assert str(source) in result.stderr
     assert "codec can't decode byte" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_cli_recursively_analyzes_c_and_cpp_sources(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    first = tmp_path / "first.c"
+    second = nested / "second.hpp"
+    ignored = nested / "notes.txt"
+    first.write_text("#if A\n#endif\n", encoding="utf-8")
+    second.write_text("#if B\n#endif\n", encoding="utf-8")
+    ignored.write_text("#if IGNORED\n#endif\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--recursive", str(tmp_path), "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert [Path(item["path"]).name for item in payload["files"]] == [
+        "first.c",
+        "second.hpp",
+    ]
+    assert [
+        item["groups"][0]["branches"][0]["condition"]
+        for item in payload["files"]
+    ] == ["A", "B"]
+
+
+def test_cli_recursive_fail_on_findings_aggregates_files(tmp_path):
+    (tmp_path / "clean.c").write_text("#if A\n#endif\n", encoding="utf-8")
+    (tmp_path / "finding.h").write_text("#if 0\n#endif\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--recursive",
+            str(tmp_path),
+            "--fail-on-findings",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert f"== {tmp_path / 'clean.c'} ==" in result.stdout
+    assert f"== {tmp_path / 'finding.h'} ==" in result.stdout
+
+
+def test_cli_requires_recursive_for_directory_input(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "use --recursive" in result.stderr
+
+
+def test_cli_batch_continues_after_malformed_file(tmp_path):
+    malformed = tmp_path / "malformed.c"
+    valid = tmp_path / "valid.c"
+    malformed.write_text("#if\n#endif\n", encoding="utf-8")
+    valid.write_text("#if VALID\n#endif\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(malformed), str(valid), "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 2
+    assert str(malformed) in result.stderr
+    assert [item["path"] for item in payload["files"]] == [str(valid)]
