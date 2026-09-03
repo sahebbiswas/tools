@@ -209,6 +209,16 @@ def test_multiline_directive_and_comments_preserve_start_line():
     assert conditions.format_expression(branch(tree).analysis.simplified) == "A && B"
 
 
+def test_multiline_directive_error_reports_physical_line_and_column():
+    source = "#if A && \\\n    B)\n#endif\n"
+
+    with pytest.raises(
+        conditions.ExpressionSyntaxError,
+        match=r"unexpected '\)' at line 2, column 6",
+    ):
+        conditions.analyze_source(source)
+
+
 @pytest.mark.parametrize(
     "source,message",
     [

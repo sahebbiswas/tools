@@ -83,32 +83,65 @@ _TOKEN_RE = re.compile(
 class _Token:
     kind: str
     text: str
-    offset: int
+    line: Optional[int]
+    column: int
 
 
-def _tokens(text: str) -> list[_Token]:
+@dataclass(frozen=True)
+class _SourceLocation:
+    line: int
+    column: int
+
+
+def _format_location(line: Optional[int], column: int) -> str:
+    if line is None:
+        return f"column {column}"
+    return f"line {line}, column {column}"
+
+
+def _tokens(
+    text: str, locations: Optional[Sequence[_SourceLocation]] = None
+) -> list[_Token]:
+    if locations is not None and len(locations) != len(text):
+        raise ValueError("source locations must correspond to every input character")
+
+    def location_at(offset: int) -> tuple[Optional[int], int]:
+        if locations is None:
+            return None, offset + 1
+        location = locations[offset]
+        return location.line, location.column
+
     result: list[_Token] = []
     offset = 0
     while offset < len(text):
         match = _TOKEN_RE.match(text, offset)
         if not match:
             if text[offset:].strip():
+                line, column = location_at(offset)
                 raise ExpressionSyntaxError(
-                    f"unsupported input at column {offset + 1}: {text[offset:]!r}"
+                    f"unsupported input at {_format_location(line, column)}: "
+                    f"{text[offset:]!r}"
                 )
             break
         kind = match.lastgroup
         assert kind is not None
         token_text = match.group(kind)
-        result.append(_Token(kind, token_text, match.start(kind)))
+        line, column = location_at(match.start(kind))
+        result.append(_Token(kind, token_text, line, column))
         offset = match.end()
     return result
 
 
 class _ExpressionParser:
-    def __init__(self, text: str):
+    def __init__(
+        self, text: str, locations: Optional[Sequence[_SourceLocation]] = None
+    ):
         self.text = text
-        self.tokens = _tokens(text)
+        self.tokens = _tokens(text, locations)
+
+    @staticmethod
+    def _token_location(token: _Token) -> str:
+        return _format_location(token.line, token.column)
 
     def parse(self) -> Expression:
         if not self.tokens:
@@ -153,18 +186,22 @@ class _ExpressionParser:
         return Predicate(self._normalize_predicate(tokens))
 
     def _validate_parentheses(self, tokens: Sequence[_Token]) -> None:
-        depth = 0
+        openings: list[_Token] = []
         for token in tokens:
             if token.kind == "lparen":
-                depth += 1
+                openings.append(token)
             elif token.kind == "rparen":
-                depth -= 1
-                if depth < 0:
+                if not openings:
                     raise ExpressionSyntaxError(
-                        f"unexpected ')' at column {token.offset + 1}"
+                        f"unexpected ')' at {self._token_location(token)}"
                     )
-        if depth:
-            raise ExpressionSyntaxError("expected ')' before end of expression")
+                openings.pop()
+        if openings:
+            opening = openings[-1]
+            raise ExpressionSyntaxError(
+                "expected ')' before end of expression; "
+                f"unmatched '(' at {self._token_location(opening)}"
+            )
 
     @staticmethod
     def _is_wrapped(tokens: Sequence[_Token]) -> bool:
@@ -195,14 +232,18 @@ class _ExpressionParser:
             elif depth == 0 and token.kind == operator:
                 if index == start:
                     raise ExpressionSyntaxError(
-                        f"expected an operand at column {token.offset + 1}"
+                        "expected an operand at "
+                        f"{_format_location(token.line, token.column)}"
                     )
                 parts.append(tokens[start:index])
                 start = index + 1
         if parts:
             if start == len(tokens):
                 token = tokens[-1]
-                raise ExpressionSyntaxError(f"expected an operand after {token.text!r}")
+                raise ExpressionSyntaxError(
+                    f"expected an operand after {token.text!r} at "
+                    f"{_format_location(token.line, token.column)}"
+                )
             parts.append(tokens[start:])
         return parts or [tokens]
 
@@ -249,7 +290,8 @@ class _ExpressionParser:
             return Constant(int(digits, base) != 0)
         except ValueError as error:
             raise ExpressionSyntaxError(
-                f"invalid integer {token.text!r} at column {token.offset + 1}"
+                f"invalid integer {token.text!r} at "
+                f"{_format_location(token.line, token.column)}"
             ) from error
 
     @staticmethod
@@ -657,32 +699,68 @@ _DIRECTIVE_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$")
 
 
 def _strip_comments(source: str) -> str:
-    """Remove comments while preserving newlines and therefore line numbers."""
+    """Remove comments while preserving source line and column positions."""
 
-    def block_replacement(match: re.Match[str]) -> str:
-        return "\n" * match.group(0).count("\n")
+    def replacement(match: re.Match[str]) -> str:
+        return "".join(
+            "\n" if character == "\n" else " " for character in match.group()
+        )
 
-    source = re.sub(r"/\*.*?\*/", block_replacement, source, flags=re.DOTALL)
-    return re.sub(r"//[^\n]*", "", source)
+    source = re.sub(r"/\*.*?\*/", replacement, source, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", replacement, source)
 
 
-def _logical_lines(source: str) -> Iterator[tuple[int, str]]:
+@dataclass(frozen=True)
+class _LogicalLine:
+    start_line: int
+    text: str
+    locations: tuple[_SourceLocation, ...]
+
+
+def _logical_lines(source: str) -> Iterator[_LogicalLine]:
     lines = _strip_comments(source).splitlines()
     index = 0
     while index < len(lines):
         start = index + 1
         text = lines[index]
+        locations = [
+            _SourceLocation(start, column) for column in range(1, len(text) + 1)
+        ]
         while text.rstrip().endswith("\\") and index + 1 < len(lines):
-            text = text.rstrip()[:-1] + " " + lines[index + 1].lstrip()
+            trimmed = text.rstrip()
+            prefix = trimmed[:-1]
+            continuation_location = locations[len(trimmed) - 1]
             index += 1
-        yield start, text
+            next_line = lines[index]
+            leading_space_count = len(next_line) - len(next_line.lstrip())
+            continuation = next_line.lstrip()
+            text = prefix + " " + continuation
+            locations = (
+                locations[: len(prefix)]
+                + [continuation_location]
+                + [
+                    _SourceLocation(index + 1, column)
+                    for column in range(
+                        leading_space_count + 1, len(next_line) + 1
+                    )
+                ]
+            )
+        yield _LogicalLine(start, text, tuple(locations))
         index += 1
 
 
 def _directive_expression(
-    kind: str, remainder: str, line: int
+    kind: str,
+    remainder: str,
+    line: int,
+    locations: Optional[Sequence[_SourceLocation]] = None,
 ) -> tuple[str, Expression]:
     text = remainder.strip()
+    if locations is not None:
+        leading_space_count = len(remainder) - len(remainder.lstrip())
+        locations = locations[
+            leading_space_count : leading_space_count + len(text)
+        ]
     if kind in {"ifdef", "ifndef"}:
         if not re.fullmatch(r"[A-Za-z_]\w*", text):
             raise ExpressionSyntaxError(
@@ -693,8 +771,10 @@ def _directive_expression(
             expression = Negation(expression)
         return text, expression
     try:
-        return text, parse_expression(text)
+        return text, _ExpressionParser(text, locations).parse()
     except ExpressionSyntaxError as error:
+        if re.search(r"\bat line \d+, column \d+\b", str(error)):
+            raise
         raise ExpressionSyntaxError(f"line {line}: {error}") from error
 
 
@@ -704,14 +784,19 @@ def parse_source(source: str) -> ConditionalTree:
     tree = ConditionalTree()
     stack: list[tuple[ConditionalGroup, ConditionalBranch]] = []
 
-    for line, text in _logical_lines(source):
+    for logical_line in _logical_lines(source):
+        line = logical_line.start_line
+        text = logical_line.text
         match = _DIRECTIVE_RE.match(text)
         if not match:
             continue
         kind, remainder = match.group(1), match.group(2)
+        remainder_locations = logical_line.locations[match.start(2) :]
 
         if kind in {"if", "ifdef", "ifndef"}:
-            expression_text, expression = _directive_expression(kind, remainder, line)
+            expression_text, expression = _directive_expression(
+                kind, remainder, line, remainder_locations
+            )
             group = ConditionalGroup(line)
             branch = ConditionalBranch(kind, line, expression_text, expression)
             group.branches.append(branch)
@@ -729,7 +814,9 @@ def parse_source(source: str) -> ConditionalTree:
         if kind == "elif":
             if current.directive == "else":
                 raise DirectiveStructureError(f"line {line}: #elif appears after #else")
-            expression_text, expression = _directive_expression(kind, remainder, line)
+            expression_text, expression = _directive_expression(
+                kind, remainder, line, remainder_locations
+            )
             branch = ConditionalBranch(kind, line, expression_text, expression)
             group.branches.append(branch)
             stack[-1] = (group, branch)
