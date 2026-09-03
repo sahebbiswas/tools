@@ -2,7 +2,8 @@
 """Analyze Boolean conditions in C/C++ preprocessor conditional blocks.
 
 This intentionally does not preprocess or parse C/C++ source code. It only
-recognizes conditional directives and treats identifiers as Boolean flags.
+recognizes conditional directives, treats identifiers as Boolean flags, and
+preserves value-bearing expressions as opaque Boolean predicates.
 """
 
 from __future__ import annotations
@@ -27,6 +28,13 @@ class Variable:
 
 
 @dataclass(frozen=True)
+class Predicate:
+    """A value-bearing expression treated as one opaque Boolean fact."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Negation:
     operand: "Expression"
 
@@ -41,7 +49,8 @@ class Disjunction:
     operands: tuple["Expression", ...]
 
 
-Expression = Union[Constant, Variable, Negation, Conjunction, Disjunction]
+BooleanAtom = Union[Variable, Predicate]
+Expression = Union[Constant, Variable, Predicate, Negation, Conjunction, Disjunction]
 TRUE = Constant(True)
 FALSE = Constant(False)
 
@@ -51,7 +60,7 @@ class ConditionError(ValueError):
 
 
 class ExpressionSyntaxError(ConditionError):
-    """Raised for an unsupported or malformed Boolean expression."""
+    """Raised for a malformed Boolean expression."""
 
 
 class DirectiveStructureError(ConditionError):
@@ -60,10 +69,12 @@ class DirectiveStructureError(ConditionError):
 
 _TOKEN_RE = re.compile(
     r"\s*(?:"
-    r"(?P<and>&&)|(?P<or>\|\|)|(?P<not>!)|"
+    r"(?P<and>&&)|(?P<or>\|\|)|(?P<not>!(?!=))|"
+    r"""(?P<string>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|"""
     r"(?P<lparen>\()|(?P<rparen>\))|"
     r"(?P<number>0[xX][0-9a-fA-F]+[uUlL]*|[0-9]+[uUlL]*)|"
-    r"(?P<identifier>[A-Za-z_]\w*)|(?P<invalid>\S)"
+    r"(?P<identifier>[A-Za-z_]\w*)|"
+    r"(?P<other>[^A-Za-z0-9_\s()]+)"
     r")"
 )
 
@@ -89,10 +100,6 @@ def _tokens(text: str) -> list[_Token]:
         kind = match.lastgroup
         assert kind is not None
         token_text = match.group(kind)
-        if kind == "invalid":
-            raise ExpressionSyntaxError(
-                f"unsupported token {token_text!r} at column {match.start(kind) + 1}"
-            )
         result.append(_Token(kind, token_text, match.start(kind)))
         offset = match.end()
     return result
@@ -102,97 +109,174 @@ class _ExpressionParser:
     def __init__(self, text: str):
         self.text = text
         self.tokens = _tokens(text)
-        self.position = 0
 
     def parse(self) -> Expression:
         if not self.tokens:
             raise ExpressionSyntaxError("expected a Boolean expression")
-        expression = self._parse_or()
-        if self.position != len(self.tokens):
-            token = self.tokens[self.position]
-            raise ExpressionSyntaxError(
-                f"unexpected token {token.text!r} at column {token.offset + 1}"
-            )
-        return expression
+        return self._parse_tokens(self.tokens)
 
-    def _accept(self, kind: str) -> Optional[_Token]:
-        if self.position < len(self.tokens) and self.tokens[self.position].kind == kind:
-            token = self.tokens[self.position]
-            self.position += 1
-            return token
+    def _parse_tokens(self, tokens: Sequence[_Token]) -> Expression:
+        if not tokens:
+            raise ExpressionSyntaxError("expected an operand")
+        self._validate_parentheses(tokens)
+
+        # The conditional and comma operators bind more weakly than ||. Their
+        # complete semantics are outside this tool's scope, so preserve the
+        # whole expression as one predicate rather than splitting it wrongly.
+        if self._has_top_level_other(tokens, {"?", ","}):
+            return Predicate(self._normalize_predicate(tokens))
+
+        parts = self._split_top_level(tokens, "or")
+        if len(parts) > 1:
+            return Disjunction(tuple(self._parse_tokens(part) for part in parts))
+        parts = self._split_top_level(tokens, "and")
+        if len(parts) > 1:
+            return Conjunction(tuple(self._parse_tokens(part) for part in parts))
+
+        if self._is_wrapped(tokens):
+            return self._parse_tokens(tokens[1:-1])
+
+        if tokens[0].kind == "not":
+            operand_tokens = tokens[1:]
+            operand = self._parse_tokens(operand_tokens)
+            if isinstance(operand, Predicate) and not self._is_wrapped(operand_tokens):
+                return Predicate(self._normalize_predicate(tokens))
+            return Negation(operand)
+
+        defined = self._parse_defined(tokens)
+        if defined is not None:
+            return defined
+        if len(tokens) == 1 and tokens[0].kind == "identifier":
+            return Variable(tokens[0].text)
+        if len(tokens) == 1 and tokens[0].kind == "number":
+            return self._parse_number(tokens[0])
+        return Predicate(self._normalize_predicate(tokens))
+
+    def _validate_parentheses(self, tokens: Sequence[_Token]) -> None:
+        depth = 0
+        for token in tokens:
+            if token.kind == "lparen":
+                depth += 1
+            elif token.kind == "rparen":
+                depth -= 1
+                if depth < 0:
+                    raise ExpressionSyntaxError(
+                        f"unexpected ')' at column {token.offset + 1}"
+                    )
+        if depth:
+            raise ExpressionSyntaxError("expected ')' before end of expression")
+
+    @staticmethod
+    def _is_wrapped(tokens: Sequence[_Token]) -> bool:
+        if len(tokens) < 2 or tokens[0].kind != "lparen":
+            return False
+        depth = 0
+        for index, token in enumerate(tokens):
+            if token.kind == "lparen":
+                depth += 1
+            elif token.kind == "rparen":
+                depth -= 1
+                if depth == 0:
+                    return index == len(tokens) - 1
+        return False
+
+    @staticmethod
+    def _split_top_level(
+        tokens: Sequence[_Token], operator: str
+    ) -> list[Sequence[_Token]]:
+        depth = 0
+        start = 0
+        parts: list[Sequence[_Token]] = []
+        for index, token in enumerate(tokens):
+            if token.kind == "lparen":
+                depth += 1
+            elif token.kind == "rparen":
+                depth -= 1
+            elif depth == 0 and token.kind == operator:
+                if index == start:
+                    raise ExpressionSyntaxError(
+                        f"expected an operand at column {token.offset + 1}"
+                    )
+                parts.append(tokens[start:index])
+                start = index + 1
+        if parts:
+            if start == len(tokens):
+                token = tokens[-1]
+                raise ExpressionSyntaxError(f"expected an operand after {token.text!r}")
+            parts.append(tokens[start:])
+        return parts or [tokens]
+
+    @staticmethod
+    def _has_top_level_other(tokens: Sequence[_Token], operators: set[str]) -> bool:
+        depth = 0
+        for token in tokens:
+            if token.kind == "lparen":
+                depth += 1
+            elif token.kind == "rparen":
+                depth -= 1
+            elif depth == 0 and token.kind == "other":
+                if any(operator in token.text for operator in operators):
+                    return True
+        return False
+
+    @staticmethod
+    def _parse_defined(tokens: Sequence[_Token]) -> Optional[Expression]:
+        if not tokens or tokens[0].kind != "identifier":
+            return None
+        if tokens[0].text != "defined":
+            return None
+        if len(tokens) == 2 and tokens[1].kind == "identifier":
+            return Variable(tokens[1].text)
+        if (
+            len(tokens) == 4
+            and tokens[1].kind == "lparen"
+            and tokens[2].kind == "identifier"
+            and tokens[3].kind == "rparen"
+        ):
+            return Variable(tokens[2].text)
         return None
 
-    def _expect(self, kind: str, description: str) -> _Token:
-        token = self._accept(kind)
-        if token is None:
-            column = (
-                self.tokens[self.position].offset + 1
-                if self.position < len(self.tokens)
-                else len(self.text) + 1
-            )
-            raise ExpressionSyntaxError(f"expected {description} at column {column}")
-        return token
-
-    def _parse_or(self) -> Expression:
-        operands = [self._parse_and()]
-        while self._accept("or"):
-            operands.append(self._parse_and())
-        return operands[0] if len(operands) == 1 else Disjunction(tuple(operands))
-
-    def _parse_and(self) -> Expression:
-        operands = [self._parse_unary()]
-        while self._accept("and"):
-            operands.append(self._parse_unary())
-        return operands[0] if len(operands) == 1 else Conjunction(tuple(operands))
-
-    def _parse_unary(self) -> Expression:
-        if self._accept("not"):
-            return Negation(self._parse_unary())
-        return self._parse_primary()
-
-    def _parse_primary(self) -> Expression:
-        if self._accept("lparen"):
-            expression = self._parse_or()
-            self._expect("rparen", "')'")
-            return expression
-
-        token = self._accept("number")
-        if token:
-            digits = re.sub(r"[uUlL]+$", "", token.text)
-            if digits.lower().startswith("0x"):
-                base = 16
-            elif len(digits) > 1 and digits.startswith("0"):
-                base = 8
-            else:
-                base = 10
-            try:
-                return Constant(int(digits, base) != 0)
-            except ValueError as error:
-                raise ExpressionSyntaxError(
-                    f"invalid integer {token.text!r} at column {token.offset + 1}"
-                ) from error
-
-        token = self._accept("identifier")
-        if token is None:
-            column = (
-                self.tokens[self.position].offset + 1
-                if self.position < len(self.tokens)
-                else len(self.text) + 1
-            )
-            raise ExpressionSyntaxError(f"expected a flag or '(' at column {column}")
-
-        if token.text != "defined":
-            return Variable(token.text)
-        if self._accept("lparen"):
-            name = self._expect("identifier", "a macro name")
-            self._expect("rparen", "')'")
+    @staticmethod
+    def _parse_number(token: _Token) -> Constant:
+        digits = re.sub(r"[uUlL]+$", "", token.text)
+        if digits.lower().startswith("0x"):
+            base = 16
+        elif len(digits) > 1 and digits.startswith("0"):
+            base = 8
         else:
-            name = self._expect("identifier", "a macro name")
-        return Variable(name.text)
+            base = 10
+        try:
+            return Constant(int(digits, base) != 0)
+        except ValueError as error:
+            raise ExpressionSyntaxError(
+                f"invalid integer {token.text!r} at column {token.offset + 1}"
+            ) from error
+
+    @staticmethod
+    def _normalize_predicate(tokens: Sequence[_Token]) -> str:
+        parts: list[str] = []
+        previous: Optional[_Token] = None
+        for token in tokens:
+            needs_space = previous is not None
+            if token.kind == "rparen" or (
+                previous is not None and previous.kind == "lparen"
+            ):
+                needs_space = False
+            if (
+                token.kind == "lparen"
+                and previous is not None
+                and previous.kind == "identifier"
+            ):
+                needs_space = False
+            if needs_space:
+                parts.append(" ")
+            parts.append(token.text)
+            previous = token
+        return "".join(parts)
 
 
 def parse_expression(text: str) -> Expression:
-    """Parse the supported Boolean subset of a preprocessor expression."""
+    """Parse Boolean structure, preserving value expressions as predicates."""
 
     return _ExpressionParser(text).parse()
 
@@ -273,7 +357,7 @@ def disjunction(*expressions: Expression) -> Expression:
 def simplify(expression: Expression) -> Expression:
     """Apply Boolean identities, including complements and absorption."""
 
-    if isinstance(expression, (Constant, Variable)):
+    if isinstance(expression, (Constant, Variable, Predicate)):
         return expression
     if isinstance(expression, Negation):
         return negate(expression.operand)
@@ -283,6 +367,10 @@ def simplify(expression: Expression) -> Expression:
 
 
 def _precedence(expression: Expression) -> int:
+    if isinstance(expression, Predicate):
+        # Predicate text may contain lower-precedence C operators. Treat it as
+        # low precedence so embedding it in Boolean output adds parentheses.
+        return 0
     if isinstance(expression, Disjunction):
         return 1
     if isinstance(expression, Conjunction):
@@ -299,6 +387,8 @@ def format_expression(expression: Expression, parent_precedence: int = 0) -> str
         text = "1" if expression.value else "0"
     elif isinstance(expression, Variable):
         text = expression.name
+    elif isinstance(expression, Predicate):
+        text = expression.text
     elif isinstance(expression, Negation):
         text = f"!{format_expression(expression.operand, _precedence(expression))}"
     else:
@@ -315,6 +405,8 @@ def expression_variables(expression: Expression) -> set[str]:
         return set()
     if isinstance(expression, Variable):
         return {expression.name}
+    if isinstance(expression, Predicate):
+        return set()
     if isinstance(expression, Negation):
         return expression_variables(expression.operand)
     result: set[str] = set()
@@ -323,13 +415,40 @@ def expression_variables(expression: Expression) -> set[str]:
     return result
 
 
+def expression_atoms(expression: Expression) -> set[BooleanAtom]:
+    """Return Boolean flags and opaque predicates referenced by an expression."""
+
+    if isinstance(expression, Constant):
+        return set()
+    if isinstance(expression, (Variable, Predicate)):
+        return {expression}
+    if isinstance(expression, Negation):
+        return expression_atoms(expression.operand)
+    result: set[BooleanAtom] = set()
+    for operand in expression.operands:
+        result.update(expression_atoms(operand))
+    return result
+
+
+def expression_predicates(expression: Expression) -> set[str]:
+    """Return the opaque value-bearing predicates in an expression."""
+
+    return {
+        atom.text
+        for atom in expression_atoms(expression)
+        if isinstance(atom, Predicate)
+    }
+
+
 class _BDD:
     """Small dependency-free ROBDD engine used for exact logical queries."""
 
-    def __init__(self, variables: Iterable[str]):
-        names = sorted(set(variables))
-        self.order = {name: index for index, name in enumerate(names)}
-        self.names = names
+    def __init__(self, atoms: Iterable[BooleanAtom]):
+        ordered_atoms = sorted(
+            set(atoms), key=lambda atom: (format_expression(atom), type(atom).__name__)
+        )
+        self.order = {atom: index for index, atom in enumerate(ordered_atoms)}
+        self.atoms = ordered_atoms
         self.nodes: list[Optional[tuple[int, int, int]]] = [None, None]
         self.unique: dict[tuple[int, int, int], int] = {}
         self._apply_cache: dict[tuple[str, int, int], int] = {}
@@ -353,8 +472,8 @@ class _BDD:
             return cached
         if isinstance(expression, Constant):
             result = int(expression.value)
-        elif isinstance(expression, Variable):
-            result = self._node(self.order[expression.name], 0, 1)
+        elif isinstance(expression, (Variable, Predicate)):
+            result = self._node(self.order[expression], 0, 1)
         elif isinstance(expression, Negation):
             result = self.negate(self.build(expression.operand))
         elif isinstance(expression, Conjunction):
@@ -433,7 +552,7 @@ class _BDD:
         item = self.nodes[node]
         assert item is not None
         variable_index, low_node, high_node = item
-        variable = Variable(self.names[variable_index])
+        variable = self.atoms[variable_index]
         low = self.to_expression(low_node)
         high = self.to_expression(high_node)
         if low == FALSE:
@@ -466,7 +585,7 @@ class _BDD:
 
 
 def _expression_size(expression: Expression) -> int:
-    if isinstance(expression, (Constant, Variable)):
+    if isinstance(expression, (Constant, Variable, Predicate)):
         return 1
     if isinstance(expression, Negation):
         return 1 + _expression_size(expression.operand)
@@ -664,10 +783,10 @@ def _tree_expressions(groups: Sequence[ConditionalGroup]) -> Iterator[Expression
 def analyze_tree(tree: ConditionalTree) -> ConditionalTree:
     """Annotate each branch with reachability and simplification results."""
 
-    variables: set[str] = set()
+    atoms: set[BooleanAtom] = set()
     for expression in _tree_expressions(tree.groups):
-        variables.update(expression_variables(expression))
-    bdd = _BDD(variables)
+        atoms.update(expression_atoms(expression))
+    bdd = _BDD(atoms)
 
     def analyze_groups(groups: Sequence[ConditionalGroup], parent: Expression) -> None:
         for group in groups:
@@ -746,6 +865,11 @@ def _branch_dict(branch: ConditionalBranch) -> dict[str, object]:
         ),
         "effective_condition": format_expression(branch.analysis.effective),
         "reason": branch.analysis.reason,
+        "opaque_predicates": (
+            sorted(expression_predicates(branch.expression))
+            if branch.expression is not None
+            else []
+        ),
         "children": [_group_dict(group) for group in branch.children],
     }
 
@@ -783,6 +907,9 @@ def _text_lines(groups: Sequence[ConditionalGroup], depth: int = 0) -> Iterator[
                 yield f"{'  ' * (depth + 1)}simplified: {simplified}"
                 if contextual != simplified:
                     yield f"{'  ' * (depth + 1)}in context: {contextual}"
+                predicates = sorted(expression_predicates(branch.expression))
+                if predicates:
+                    yield (f"{'  ' * (depth + 1)}opaque: {', '.join(predicates)}")
             yield (
                 f"{'  ' * (depth + 1)}effective: "
                 f"{format_expression(branch.analysis.effective)}"
