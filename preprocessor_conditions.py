@@ -1137,8 +1137,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif results:
             output = tree_to_dict(results[0][1])
         else:
-            output = {"files": []}
-        print(json.dumps(output, indent=2))
+            output = None
+        if output is not None:
+            print(json.dumps(output, indent=2))
     elif batch_mode:
         reports = [
             f"== {path} ==\n{format_report(tree)}" for path, tree in results

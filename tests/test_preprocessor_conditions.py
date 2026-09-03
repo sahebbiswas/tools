@@ -430,3 +430,19 @@ def test_cli_batch_continues_after_malformed_file(tmp_path):
     assert result.returncode == 2
     assert str(malformed) in result.stderr
     assert [item["path"] for item in payload["files"]] == [str(valid)]
+
+
+def test_cli_single_file_json_error_does_not_emit_batch_schema(tmp_path):
+    malformed = tmp_path / "malformed.c"
+    malformed.write_text("#if\n#endif\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(malformed), "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert str(malformed) in result.stderr
