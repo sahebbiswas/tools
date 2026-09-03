@@ -371,6 +371,46 @@ def test_default_report_includes_context_only_simplification():
     assert "in context: CHILD" in report
 
 
+def test_formatting_only_normalization_is_not_reported_as_changed():
+    tree = conditions.analyze_source(
+        """#if (PARENTHESIZED)
+#endif
+#if defined(FEATURE)
+#endif
+"""
+    )
+
+    report = conditions.format_report(tree, verbose=False)
+    result = conditions.tree_to_dict(tree, verbose=False)
+
+    assert report == "No changed, dead, or redundant conditional directives found."
+    assert result == {"groups": []}
+
+
+def test_visibility_is_computed_once_per_branch(monkeypatch):
+    tree = conditions.analyze_source(
+        """#if OUTER
+#if MIDDLE
+#if INNER && INNER
+#endif
+#endif
+#endif
+"""
+    )
+    original = conditions._branch_is_notable
+    calls = {}
+
+    def counted(branch):
+        calls[id(branch)] = calls.get(id(branch), 0) + 1
+        return original(branch)
+
+    monkeypatch.setattr(conditions, "_branch_is_notable", counted)
+
+    conditions.format_report(tree, verbose=False)
+
+    assert sorted(calls.values()) == [1, 1, 1]
+
+
 def test_colored_report_marks_branch_categories():
     tree = conditions.analyze_source(
         """#if UNCHANGED
