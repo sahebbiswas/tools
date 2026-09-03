@@ -134,9 +134,13 @@ expression such as `(A && B && (C || !D)) || A` simplifies to `A` by absorption.
 Tests use `pytest` as a development-only dependency:
 
 ```powershell
-py -m pip install pytest
+py -m pip install pytest hypothesis
 py -m pytest
 ```
+
+The suite includes Hypothesis-generated Boolean expressions that check both
+algebraic and exact simplification against the BDD engine, plus fixed regression
+cases for dead, redundant, and reachable branch classifications.
 
 ## `file-github-issues`
 
