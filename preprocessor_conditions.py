@@ -400,21 +400,6 @@ def format_expression(expression: Expression, parent_precedence: int = 0) -> str
     return f"({text})" if _precedence(expression) < parent_precedence else text
 
 
-def expression_variables(expression: Expression) -> set[str]:
-    if isinstance(expression, Constant):
-        return set()
-    if isinstance(expression, Variable):
-        return {expression.name}
-    if isinstance(expression, Predicate):
-        return set()
-    if isinstance(expression, Negation):
-        return expression_variables(expression.operand)
-    result: set[str] = set()
-    for operand in expression.operands:
-        result.update(expression_variables(operand))
-    return result
-
-
 def expression_atoms(expression: Expression) -> set[BooleanAtom]:
     """Return Boolean flags and opaque predicates referenced by an expression."""
 
