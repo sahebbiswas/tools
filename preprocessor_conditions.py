@@ -55,12 +55,33 @@ TRUE = Constant(True)
 FALSE = Constant(False)
 
 
+@dataclass(frozen=True)
+class _SourceLocation:
+    line: Optional[int]
+    column: int
+
+
+def _format_location(location: _SourceLocation) -> str:
+    if location.line is None:
+        return f"column {location.column}"
+    return f"line {location.line}, column {location.column}"
+
+
 class ConditionError(ValueError):
     """Base class for input errors reported by the analyzer."""
 
 
 class ExpressionSyntaxError(ConditionError):
     """Raised for a malformed Boolean expression."""
+
+    def __init__(
+        self, message: str, *, location: Optional[_SourceLocation] = None
+    ) -> None:
+        self.message = message
+        self.location = location
+        if location is not None:
+            message = f"{message} at {_format_location(location)}"
+        super().__init__(message)
 
 
 class DirectiveStructureError(ConditionError):
@@ -83,20 +104,7 @@ _TOKEN_RE = re.compile(
 class _Token:
     kind: str
     text: str
-    line: Optional[int]
-    column: int
-
-
-@dataclass(frozen=True)
-class _SourceLocation:
-    line: int
-    column: int
-
-
-def _format_location(line: Optional[int], column: int) -> str:
-    if line is None:
-        return f"column {column}"
-    return f"line {line}, column {column}"
+    location: _SourceLocation
 
 
 def _tokens(
@@ -105,11 +113,10 @@ def _tokens(
     if locations is not None and len(locations) != len(text):
         raise ValueError("source locations must correspond to every input character")
 
-    def location_at(offset: int) -> tuple[Optional[int], int]:
+    def location_at(offset: int) -> _SourceLocation:
         if locations is None:
-            return None, offset + 1
-        location = locations[offset]
-        return location.line, location.column
+            return _SourceLocation(None, offset + 1)
+        return locations[offset]
 
     result: list[_Token] = []
     offset = 0
@@ -117,17 +124,15 @@ def _tokens(
         match = _TOKEN_RE.match(text, offset)
         if not match:
             if text[offset:].strip():
-                line, column = location_at(offset)
                 raise ExpressionSyntaxError(
-                    f"unsupported input at {_format_location(line, column)}: "
-                    f"{text[offset:]!r}"
+                    f"unsupported input: {text[offset:]!r}",
+                    location=location_at(offset),
                 )
             break
         kind = match.lastgroup
         assert kind is not None
         token_text = match.group(kind)
-        line, column = location_at(match.start(kind))
-        result.append(_Token(kind, token_text, line, column))
+        result.append(_Token(kind, token_text, location_at(match.start(kind))))
         offset = match.end()
     return result
 
@@ -138,10 +143,6 @@ class _ExpressionParser:
     ):
         self.text = text
         self.tokens = _tokens(text, locations)
-
-    @staticmethod
-    def _token_location(token: _Token) -> str:
-        return _format_location(token.line, token.column)
 
     def parse(self) -> Expression:
         if not self.tokens:
@@ -193,14 +194,14 @@ class _ExpressionParser:
             elif token.kind == "rparen":
                 if not openings:
                     raise ExpressionSyntaxError(
-                        f"unexpected ')' at {self._token_location(token)}"
+                        "unexpected ')'", location=token.location
                     )
                 openings.pop()
         if openings:
             opening = openings[-1]
             raise ExpressionSyntaxError(
-                "expected ')' before end of expression; "
-                f"unmatched '(' at {self._token_location(opening)}"
+                "expected ')' before end of expression; unmatched '('",
+                location=opening.location,
             )
 
     @staticmethod
@@ -232,8 +233,7 @@ class _ExpressionParser:
             elif depth == 0 and token.kind == operator:
                 if index == start:
                     raise ExpressionSyntaxError(
-                        "expected an operand at "
-                        f"{_format_location(token.line, token.column)}"
+                        "expected an operand", location=token.location
                     )
                 parts.append(tokens[start:index])
                 start = index + 1
@@ -241,8 +241,8 @@ class _ExpressionParser:
             if start == len(tokens):
                 token = tokens[-1]
                 raise ExpressionSyntaxError(
-                    f"expected an operand after {token.text!r} at "
-                    f"{_format_location(token.line, token.column)}"
+                    f"expected an operand after {token.text!r}",
+                    location=token.location,
                 )
             parts.append(tokens[start:])
         return parts or [tokens]
@@ -290,8 +290,7 @@ class _ExpressionParser:
             return Constant(int(digits, base) != 0)
         except ValueError as error:
             raise ExpressionSyntaxError(
-                f"invalid integer {token.text!r} at "
-                f"{_format_location(token.line, token.column)}"
+                f"invalid integer {token.text!r}", location=token.location
             ) from error
 
     @staticmethod
@@ -773,7 +772,7 @@ def _directive_expression(
     try:
         return text, _ExpressionParser(text, locations).parse()
     except ExpressionSyntaxError as error:
-        if re.search(r"\bat line \d+, column \d+\b", str(error)):
+        if error.location is not None:
             raise
         raise ExpressionSyntaxError(f"line {line}: {error}") from error
 
