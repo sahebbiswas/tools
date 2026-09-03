@@ -959,7 +959,53 @@ def analyze_source(source: str) -> ConditionalTree:
     return analyze_tree(parse_source(source))
 
 
-def _branch_dict(branch: ConditionalBranch) -> dict[str, object]:
+def _branch_differs_from_source(branch: ConditionalBranch) -> bool:
+    """Return whether simplification or context changes the source condition."""
+
+    assert branch.analysis is not None
+    if branch.expression_text is None:
+        return False
+    simplified = (
+        format_expression(branch.analysis.simplified)
+        if branch.analysis.simplified is not None
+        else None
+    )
+    contextual = (
+        format_expression(branch.analysis.contextual)
+        if branch.analysis.contextual is not None
+        else None
+    )
+    return (
+        branch.expression_text != simplified
+        or branch.expression_text != contextual
+    )
+
+
+def _branch_is_notable(branch: ConditionalBranch) -> bool:
+    assert branch.analysis is not None
+    return (
+        branch.analysis.status in {"dead", "redundant"}
+        or _branch_differs_from_source(branch)
+    )
+
+
+def _branch_is_visible(branch: ConditionalBranch, verbose: bool) -> bool:
+    return (
+        verbose
+        or _branch_is_notable(branch)
+        or any(_group_is_visible(group, verbose) for group in branch.children)
+    )
+
+
+def _group_is_visible(group: ConditionalGroup, verbose: bool) -> bool:
+    return any(_branch_is_visible(branch, verbose) for branch in group.branches)
+
+
+def _tree_is_visible(tree: ConditionalTree, verbose: bool) -> bool:
+    return any(_group_is_visible(group, verbose) for group in tree.groups)
+
+
+def _branch_dict(branch: ConditionalBranch, verbose: bool) -> dict[str, object]:
     assert branch.analysis is not None
     return {
         "directive": branch.directive,
@@ -983,57 +1029,124 @@ def _branch_dict(branch: ConditionalBranch) -> dict[str, object]:
             if branch.expression is not None
             else []
         ),
-        "children": [_group_dict(group) for group in branch.children],
+        "children": [
+            _group_dict(group, verbose)
+            for group in branch.children
+            if _group_is_visible(group, verbose)
+        ],
     }
 
 
-def _group_dict(group: ConditionalGroup) -> dict[str, object]:
+def _group_dict(group: ConditionalGroup, verbose: bool) -> dict[str, object]:
     return {
         "line": group.line,
         "end_line": group.end_line,
-        "branches": [_branch_dict(branch) for branch in group.branches],
+        "branches": [
+            _branch_dict(branch, verbose)
+            for branch in group.branches
+            if _branch_is_visible(branch, verbose)
+        ],
     }
 
 
-def tree_to_dict(tree: ConditionalTree) -> dict[str, object]:
+def tree_to_dict(tree: ConditionalTree, *, verbose: bool = True) -> dict[str, object]:
     """Convert an analyzed tree to a JSON-serializable dictionary."""
 
-    return {"groups": [_group_dict(group) for group in tree.groups]}
+    return {
+        "groups": [
+            _group_dict(group, verbose)
+            for group in tree.groups
+            if _group_is_visible(group, verbose)
+        ]
+    }
 
 
-def _text_lines(groups: Sequence[ConditionalGroup], depth: int = 0) -> Iterator[str]:
+_COLORS = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "cyan": "\033[36m",
+    "gray": "\033[90m",
+}
+_COLOR_RESET = "\033[0m"
+
+
+def _colored(text: str, color: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"{_COLORS[color]}{text}{_COLOR_RESET}"
+
+
+def _branch_color(branch: ConditionalBranch) -> str:
+    assert branch.analysis is not None
+    if branch.analysis.status == "dead":
+        return "red"
+    if branch.analysis.status == "redundant":
+        return "yellow"
+    if _branch_differs_from_source(branch):
+        return "green"
+    return "gray"
+
+
+def _text_lines(
+    groups: Sequence[ConditionalGroup],
+    depth: int = 0,
+    *,
+    verbose: bool = True,
+    color: bool = False,
+) -> Iterator[str]:
     for group in groups:
         for branch in group.branches:
+            if not _branch_is_visible(branch, verbose):
+                continue
             assert branch.analysis is not None
             condition = f" {branch.expression_text}" if branch.expression_text else ""
-            yield (
+            header = (
                 f"{'  ' * depth}{branch.line}: #{branch.directive}{condition} "
                 f"[{branch.analysis.status}]"
             )
+            yield _colored(header, _branch_color(branch), color)
             if branch.analysis.reason:
-                yield f"{'  ' * (depth + 1)}reason: {branch.analysis.reason}"
+                reason = f"{'  ' * (depth + 1)}reason: {branch.analysis.reason}"
+                yield _colored(reason, _branch_color(branch), color)
             if branch.analysis.simplified is not None:
                 simplified = format_expression(branch.analysis.simplified)
                 contextual = format_expression(
                     branch.analysis.contextual or branch.analysis.simplified
                 )
-                yield f"{'  ' * (depth + 1)}simplified: {simplified}"
+                simplified_line = f"{'  ' * (depth + 1)}simplified: {simplified}"
+                simplified_color = (
+                    "green" if branch.expression_text != simplified else "gray"
+                )
+                yield _colored(simplified_line, simplified_color, color)
                 if contextual != simplified:
-                    yield f"{'  ' * (depth + 1)}in context: {contextual}"
+                    contextual_line = f"{'  ' * (depth + 1)}in context: {contextual}"
+                    yield _colored(contextual_line, "green", color)
                 predicates = sorted(expression_predicates(branch.expression))
                 if predicates:
-                    yield (f"{'  ' * (depth + 1)}opaque: {', '.join(predicates)}")
-            yield (
+                    opaque = f"{'  ' * (depth + 1)}opaque: {', '.join(predicates)}"
+                    yield _colored(opaque, "cyan", color)
+            effective = (
                 f"{'  ' * (depth + 1)}effective: "
                 f"{format_expression(branch.analysis.effective)}"
             )
-            yield from _text_lines(branch.children, depth + 1)
+            yield _colored(effective, "gray", color)
+            yield from _text_lines(
+                branch.children, depth + 1, verbose=verbose, color=color
+            )
 
 
-def format_report(tree: ConditionalTree) -> str:
+def format_report(
+    tree: ConditionalTree, *, verbose: bool = True, color: bool = False
+) -> str:
     """Render a compact, indented representation of an analyzed tree."""
 
-    return "\n".join(_text_lines(tree.groups)) or "No conditional directives found."
+    report = "\n".join(_text_lines(tree.groups, verbose=verbose, color=color))
+    if report:
+        return report
+    if tree.groups:
+        return "No changed, dead, or redundant conditional directives found."
+    return "No conditional directives found."
 
 
 def _has_findings(tree: ConditionalTree) -> bool:
@@ -1104,6 +1217,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--json", action="store_true", help="write the conditional tree as JSON"
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="include unchanged conditional branches in the report",
+    )
+    parser.add_argument(
         "--fail-on-findings",
         action="store_true",
         help="exit with status 1 when a dead or redundant branch is found",
@@ -1130,24 +1248,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if batch_mode:
             output = {
                 "files": [
-                    {"path": str(path), **tree_to_dict(tree)}
+                    {
+                        "path": str(path),
+                        **tree_to_dict(tree, verbose=args.verbose),
+                    }
                     for path, tree in results
+                    if _tree_is_visible(tree, args.verbose)
                 ]
             }
         elif results:
-            output = tree_to_dict(results[0][1])
+            output = tree_to_dict(results[0][1], verbose=args.verbose)
         else:
             output = None
         if output is not None:
             print(json.dumps(output, indent=2))
     elif batch_mode:
+        color = sys.stdout.isatty()
         reports = [
-            f"== {path} ==\n{format_report(tree)}" for path, tree in results
+            "\n".join(
+                (
+                    _colored(f"== {path} ==", "cyan", color),
+                    format_report(tree, verbose=args.verbose, color=color),
+                )
+            )
+            for path, tree in results
+            if _tree_is_visible(tree, args.verbose)
         ]
         if reports:
             print("\n\n".join(reports))
     elif results:
-        print(format_report(results[0][1]))
+        print(
+            format_report(
+                results[0][1], verbose=args.verbose, color=sys.stdout.isatty()
+            )
+        )
 
     if had_errors:
         return 2

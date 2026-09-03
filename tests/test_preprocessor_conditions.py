@@ -318,6 +318,80 @@ def test_text_report_labels_opaque_predicates():
     assert "opaque: VERSION >= 4" in conditions.format_report(tree)
 
 
+def test_default_report_filters_unchanged_branches():
+    tree = conditions.analyze_source(
+        """#if UNCHANGED
+#endif
+#if DUP && DUP
+#endif
+#if 0
+#endif
+#if FLAG || !FLAG
+#endif
+"""
+    )
+
+    report = conditions.format_report(tree, verbose=False)
+
+    assert "#if UNCHANGED" not in report
+    assert "#if DUP && DUP [reachable]" in report
+    assert "#if 0 [dead]" in report
+    assert "#if FLAG || !FLAG [redundant]" in report
+
+
+def test_filtered_json_retains_unchanged_ancestor_of_changed_branch():
+    tree = conditions.analyze_source(
+        """#if PARENT
+#if CHILD && CHILD
+#endif
+#endif
+"""
+    )
+
+    result = conditions.tree_to_dict(tree, verbose=False)
+
+    parent = result["groups"][0]["branches"][0]
+    nested = parent["children"][0]["branches"][0]
+    assert parent["condition"] == "PARENT"
+    assert nested["condition"] == "CHILD && CHILD"
+
+
+def test_default_report_includes_context_only_simplification():
+    tree = conditions.analyze_source(
+        """#if PARENT
+#if PARENT && CHILD
+#endif
+#endif
+"""
+    )
+
+    report = conditions.format_report(tree, verbose=False)
+
+    assert "#if PARENT && CHILD [reachable]" in report
+    assert "in context: CHILD" in report
+
+
+def test_colored_report_marks_branch_categories():
+    tree = conditions.analyze_source(
+        """#if UNCHANGED
+#endif
+#if DUP && DUP
+#endif
+#if 0
+#endif
+#if FLAG || !FLAG
+#endif
+"""
+    )
+
+    report = conditions.format_report(tree, verbose=True, color=True)
+
+    assert "\033[90m1: #if UNCHANGED [reachable]\033[0m" in report
+    assert "\033[32m3: #if DUP && DUP [reachable]\033[0m" in report
+    assert "\033[31m5: #if 0 [dead]\033[0m" in report
+    assert "\033[33m7: #if FLAG || !FLAG [redundant]\033[0m" in report
+
+
 def test_cli_json_and_fail_on_findings(tmp_path):
     source = tmp_path / "sample.c"
     source.write_text("#if A || B\n#elif A\n#endif\n", encoding="utf-8")
@@ -330,7 +404,7 @@ def test_cli_json_and_fail_on_findings(tmp_path):
     )
 
     assert result.returncode == 1
-    assert json.loads(result.stdout)["groups"][0]["branches"][1]["status"] == "dead"
+    assert json.loads(result.stdout)["groups"][0]["branches"][0]["status"] == "dead"
 
 
 def test_cli_reports_non_utf8_input_without_traceback(tmp_path):
@@ -361,7 +435,14 @@ def test_cli_recursively_analyzes_c_and_cpp_sources(tmp_path):
     ignored.write_text("#if IGNORED\n#endif\n", encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--recursive", str(tmp_path), "--json"],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--recursive",
+            str(tmp_path),
+            "--json",
+            "--verbose",
+        ],
         capture_output=True,
         check=False,
         text=True,
@@ -397,7 +478,7 @@ def test_cli_recursive_fail_on_findings_aggregates_files(tmp_path):
     )
 
     assert result.returncode == 1
-    assert f"== {tmp_path / 'clean.c'} ==" in result.stdout
+    assert f"== {tmp_path / 'clean.c'} ==" not in result.stdout
     assert f"== {tmp_path / 'finding.h'} ==" in result.stdout
 
 
@@ -420,7 +501,14 @@ def test_cli_batch_continues_after_malformed_file(tmp_path):
     valid.write_text("#if VALID\n#endif\n", encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), str(malformed), str(valid), "--json"],
+        [
+            sys.executable,
+            str(SCRIPT),
+            str(malformed),
+            str(valid),
+            "--json",
+            "--verbose",
+        ],
         capture_output=True,
         check=False,
         text=True,
@@ -446,3 +534,62 @@ def test_cli_single_file_json_error_does_not_emit_batch_schema(tmp_path):
     assert result.returncode == 2
     assert result.stdout == ""
     assert str(malformed) in result.stderr
+
+
+def test_cli_json_filters_by_default_and_verbose_restores_full_tree(tmp_path):
+    source = tmp_path / "conditions.c"
+    source.write_text(
+        """#if UNCHANGED
+#endif
+#if DUP && DUP
+#endif
+#if 0
+#endif
+""",
+        encoding="utf-8",
+    )
+
+    concise = subprocess.run(
+        [sys.executable, str(SCRIPT), str(source), "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    verbose = subprocess.run(
+        [sys.executable, str(SCRIPT), str(source), "--json", "--verbose"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    concise_conditions = [
+        group["branches"][0]["condition"]
+        for group in json.loads(concise.stdout)["groups"]
+    ]
+    verbose_conditions = [
+        group["branches"][0]["condition"]
+        for group in json.loads(verbose.stdout)["groups"]
+    ]
+    assert concise.returncode == verbose.returncode == 0
+    assert concise_conditions == ["DUP && DUP", "0"]
+    assert verbose_conditions == ["UNCHANGED", "DUP && DUP", "0"]
+    assert "\033[" not in concise.stdout
+    assert "\033[" not in verbose.stdout
+
+
+def test_cli_batch_json_omits_files_without_displayed_entries(tmp_path):
+    (tmp_path / "unchanged.c").write_text("#if OK\n#endif\n", encoding="utf-8")
+    (tmp_path / "changed.c").write_text(
+        "#if DUP && DUP\n#endif\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--recursive", str(tmp_path), "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert [Path(item["path"]).name for item in payload["files"]] == ["changed.c"]
