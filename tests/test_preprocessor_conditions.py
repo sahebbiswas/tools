@@ -387,6 +387,22 @@ def test_formatting_only_normalization_is_not_reported_as_changed():
     assert result == {"groups": []}
 
 
+def test_operand_order_and_association_are_not_reported_as_changes():
+    tree = conditions.analyze_source(
+        """#if B && A
+#endif
+#if C || (A || B)
+#endif
+"""
+    )
+
+    report = conditions.format_report(tree, verbose=False)
+    result = conditions.tree_to_dict(tree, verbose=False)
+
+    assert report == "No changed, dead, or redundant conditional directives found."
+    assert result == {"groups": []}
+
+
 def test_visibility_is_computed_once_per_branch(monkeypatch):
     tree = conditions.analyze_source(
         """#if OUTER
