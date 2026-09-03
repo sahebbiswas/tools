@@ -28,9 +28,7 @@ def test_complements_and_constants_are_simplified():
 
 
 def test_exact_reported_simplification_handles_consensus_identity():
-    tree = conditions.analyze_source(
-        "#if (A && B) || (A && !B)\n#endif\n"
-    )
+    tree = conditions.analyze_source("#if (A && B) || (A && !B)\n#endif\n")
 
     assert conditions.format_expression(branch(tree).analysis.simplified) == "A"
 
@@ -129,6 +127,75 @@ def test_ifdef_ifndef_and_defined_forms():
     assert conditions.format_expression(branch(tree, group=1).expression) == "!OTHER"
 
 
+def test_value_expression_becomes_opaque_predicate_without_losing_boolean_shape():
+    expression = conditions.parse_expression("VERSION >= 4 && defined(FOO)")
+
+    assert isinstance(expression, conditions.Conjunction)
+    assert conditions.Predicate("VERSION >= 4") in expression.operands
+    assert conditions.Variable("FOO") in expression.operands
+
+
+def test_parent_flag_reasoning_continues_with_opaque_predicate():
+    tree = conditions.analyze_source(
+        """
+#if VERSION >= 4 && defined(FOO)
+#if defined(FOO)
+#endif
+#endif
+"""
+    )
+
+    outer = branch(tree)
+    nested = outer.children[0].branches[0]
+    assert nested.analysis.status == "redundant"
+    assert conditions.expression_predicates(outer.expression) == {"VERSION >= 4"}
+
+
+def test_equivalent_repeated_opaque_predicate_makes_elif_dead():
+    tree = conditions.analyze_source(
+        """
+#if VERSION >= 4 && FOO
+#elif FOO && VERSION >= 4
+#endif
+"""
+    )
+
+    assert branch(tree, index=1).analysis.status == "dead"
+
+
+def test_comparison_not_equal_is_not_parsed_as_boolean_negation():
+    expression = conditions.parse_expression("VERSION != 4 && !DISABLED")
+
+    assert isinstance(expression, conditions.Conjunction)
+    assert conditions.Predicate("VERSION != 4") in expression.operands
+    assert conditions.Negation(conditions.Variable("DISABLED")) in expression.operands
+
+
+def test_boolean_negation_of_parenthesized_predicate_is_preserved():
+    expression = conditions.parse_expression("!(VERSION >= 4)")
+
+    assert expression == conditions.Negation(conditions.Predicate("VERSION >= 4"))
+    assert conditions.format_expression(expression) == "!(VERSION >= 4)"
+
+
+def test_unparenthesized_value_negation_remains_inside_opaque_predicate():
+    expression = conditions.parse_expression("!VERSION >= 4")
+
+    assert expression == conditions.Predicate("! VERSION >= 4")
+
+
+def test_logical_text_inside_function_argument_remains_opaque():
+    expression = conditions.parse_expression(
+        '__has_include("platform( && )config.h") && FEATURE'
+    )
+
+    assert isinstance(expression, conditions.Conjunction)
+    assert (
+        conditions.Predicate('__has_include("platform( && )config.h")')
+        in expression.operands
+    )
+
+
 def test_multiline_directive_and_comments_preserve_start_line():
     tree = conditions.analyze_source(
         """// heading
@@ -148,7 +215,8 @@ def test_multiline_directive_and_comments_preserve_start_line():
         ("#elif A\n", "no matching #if"),
         ("#if A\n#else\n#else\n#endif\n", "duplicate #else"),
         ("#if A\n", "no matching #endif"),
-        ("#if A == B\n#endif\n", "unsupported token"),
+        ("#if A &&\n#endif\n", "expected an operand"),
+        ("#if (A || B\n#endif\n", r"expected.*'\)'"),
         ("#if 08\n#endif\n", "invalid integer"),
     ],
 )
@@ -165,6 +233,21 @@ def test_json_tree_preserves_nesting():
     assert result["groups"][0]["end_line"] == 4
     assert nested["end_line"] == 3
     assert nested["branches"][0]["condition"] == "B"
+
+
+def test_json_identifies_opaque_predicates():
+    tree = conditions.analyze_source("#if (X + 1) >= LIMIT\n#endif\n")
+
+    result = conditions.tree_to_dict(tree)
+    assert result["groups"][0]["branches"][0]["opaque_predicates"] == [
+        "(X + 1) >= LIMIT"
+    ]
+
+
+def test_text_report_labels_opaque_predicates():
+    tree = conditions.analyze_source("#if VERSION >= 4 && FOO\n#endif\n")
+
+    assert "opaque: VERSION >= 4" in conditions.format_report(tree)
 
 
 def test_cli_json_and_fail_on_findings(tmp_path):

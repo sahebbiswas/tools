@@ -73,9 +73,26 @@ processing the source code itself. It builds a nested tree from `#if`, `#elif`,
 
 The expression parser supports Boolean flags, integer constants, `defined(X)`
 or `defined X`, `!`, `&&`, `||`, parentheses, comments, and backslash-continued
-directives. It intentionally rejects arithmetic, comparisons, bitwise operators,
-function-like macros, and macro-value expansion. This keeps results exact under
-the documented assumption that identifiers represent Boolean flags.
+directives. Value-bearing expressions using comparisons, arithmetic, bitwise
+operators, or function-like macros are preserved as opaque Boolean predicates.
+The surrounding Boolean structure remains analyzable, and identical normalized
+predicates are recognized across branches. Text output labels these expressions
+as `opaque`; JSON output includes them in `opaque_predicates`.
+
+Opaque predicates are not evaluated or related to different value expressions.
+For example, `VERSION >= 4` and `VERSION < 4` remain independent facts rather
+than being assumed to be complements. Macro expansion is also intentionally out
+of scope.
+
+For example, `VERSION >= 4` remains opaque here, but the nested `FOO` condition
+is reported as redundant:
+
+```c
+#if VERSION >= 4 && defined(FOO)
+#if defined(FOO)
+#endif
+#endif
+```
 
 The script has no runtime dependencies beyond Python 3.9 or newer. Run it in
 text mode:
@@ -91,7 +108,7 @@ py .\preprocessor_conditions.py .\source.c --json
 ```
 
 Use `--fail-on-findings` to return exit status 1 when a dead or redundant branch
-is found, which is useful in CI. Invalid directive structure or unsupported
+is found, which is useful in CI. Invalid directive structure or malformed
 expressions return exit status 2.
 
 For example, in this conditional:
