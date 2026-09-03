@@ -117,6 +117,20 @@ Or emit the complete conditional tree as JSON:
 py .\preprocessor_conditions.py .\source.c --json
 ```
 
+By default, reports include only dead or redundant branches and conditions whose
+simplified or contextual form differs from the source. Use `--verbose` to retain
+the full report, including unchanged branches:
+
+```powershell
+py .\preprocessor_conditions.py .\source.c --verbose
+```
+
+Interactive text output uses red for dead branches, yellow for redundant
+branches, green for changed conditions, gray for unchanged context, and cyan
+for opaque predicates and batch file headings. Redirected text remains plain,
+and JSON output is always uncolored. The same default filtering applies to JSON;
+combine `--json --verbose` to emit the complete tree.
+
 Pass multiple files to analyze them as a batch, or recursively scan a directory
 for `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, and `.hxx` files:
 
@@ -126,7 +140,8 @@ py .\preprocessor_conditions.py --recursive .\src\ --json
 
 Batch JSON contains a `files` array with each path and its conditional tree;
 batch text output labels each report with its path. A malformed or unreadable
-file returns status 2 after the remaining files have been analyzed.
+file returns status 2 after the remaining files have been analyzed. In concise
+mode, batch output omits files with no displayed entries.
 
 Use `--fail-on-findings` to return exit status 1 when a dead or redundant branch
 is found, which is useful in CI. Invalid directive structure or malformed
