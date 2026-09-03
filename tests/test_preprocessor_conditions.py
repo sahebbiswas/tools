@@ -180,3 +180,20 @@ def test_cli_json_and_fail_on_findings(tmp_path):
 
     assert result.returncode == 1
     assert json.loads(result.stdout)["groups"][0]["branches"][1]["status"] == "dead"
+
+
+def test_cli_reports_non_utf8_input_without_traceback(tmp_path):
+    source = tmp_path / "invalid.c"
+    source.write_bytes(b"#if A\n\xff\n#endif\n")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(source)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert str(source) in result.stderr
+    assert "codec can't decode byte" in result.stderr
+    assert "Traceback" not in result.stderr

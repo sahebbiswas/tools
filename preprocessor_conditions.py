@@ -827,7 +827,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tree = analyze_source(source)
     except OSError as error:
         parser.error(str(error))
-    except ConditionError as error:
+    except (ConditionError, UnicodeDecodeError) as error:
         print(f"{args.source}: {error}", file=sys.stderr)
         return 2
 
