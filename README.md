@@ -6,6 +6,7 @@ A small collection of Windows-oriented utility scripts.
 
 - [`colors3.py`](#colors3py) — ANSI true-color output helpers for Python console programs.
 - [`exif_fix.py`](#exif_fixpy) — create JPEG copies with updated capture time and GPS metadata.
+- [`preprocessor_conditions.py`](#preprocessor_conditionspy) — analyze Boolean C/C++ preprocessor condition trees.
 - [`file-github-issues`](#file-github-issues) — create a batch of GitHub issues from a Markdown file.
 
 ## `colors3.py`
@@ -57,6 +58,59 @@ py .\exif_fix.py .\photos "2011:07:31 11:11:11" "22.577832,88.4007126" --time 1
 The first image receives the supplied date and time; subsequent images are
 offset by `--time` minutes (one minute by default). Supported input extensions
 are `.jpg`, `.jpeg`, and `.png`; generated files are JPEGs.
+
+## `preprocessor_conditions.py`
+
+Parses the conditional directives in a C/C++-style source file without
+processing the source code itself. It builds a nested tree from `#if`, `#elif`,
+`#else`, and `#endif` directives (with `#ifdef` and `#ifndef` support), then:
+
+- marks branches that can never be selected as `dead`;
+- marks conditions that are always true under parent and preceding-branch
+  constraints as `redundant`;
+- simplifies each condition using Boolean identities; and
+- reports the effective condition for every branch.
+
+The expression parser supports Boolean flags, integer constants, `defined(X)`
+or `defined X`, `!`, `&&`, `||`, parentheses, comments, and backslash-continued
+directives. It intentionally rejects arithmetic, comparisons, bitwise operators,
+function-like macros, and macro-value expansion. This keeps results exact under
+the documented assumption that identifiers represent Boolean flags.
+
+The script has no runtime dependencies beyond Python 3.9 or newer. Run it in
+text mode:
+
+```powershell
+py .\preprocessor_conditions.py .\source.c
+```
+
+Or emit the complete conditional tree as JSON:
+
+```powershell
+py .\preprocessor_conditions.py .\source.c --json
+```
+
+Use `--fail-on-findings` to return exit status 1 when a dead or redundant branch
+is found, which is useful in CI. Invalid directive structure or unsupported
+expressions return exit status 2.
+
+For example, in this conditional:
+
+```c
+#if A || B
+#elif A
+#endif
+```
+
+The `#elif A` branch is dead because it requires both `!(A || B)` and `A`. An
+expression such as `(A && B && (C || !D)) || A` simplifies to `A` by absorption.
+
+Tests use `pytest` as a development-only dependency:
+
+```powershell
+py -m pip install pytest
+py -m pytest
+```
 
 ## `file-github-issues`
 
