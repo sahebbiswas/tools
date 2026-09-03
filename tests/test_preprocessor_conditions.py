@@ -353,7 +353,42 @@ def test_filtered_json_retains_unchanged_ancestor_of_changed_branch():
     parent = result["groups"][0]["branches"][0]
     nested = parent["children"][0]["branches"][0]
     assert parent["condition"] == "PARENT"
+    assert "simplified_condition" not in parent
+    assert "contextual_condition" not in parent
+    assert "effective_condition" not in parent
     assert nested["condition"] == "CHILD && CHILD"
+    assert nested["simplified_condition"] == "CHILD"
+
+
+def test_filtered_text_uses_header_only_for_unchanged_ancestor():
+    tree = conditions.analyze_source(
+        """#if PARENT
+#if CHILD && CHILD
+#endif
+#endif
+"""
+    )
+
+    lines = conditions.format_report(tree, verbose=False).splitlines()
+
+    assert lines[0] == "1: #if PARENT [reachable]"
+    assert lines[1] == "  2: #if CHILD && CHILD [reachable]"
+
+
+def test_verbose_json_keeps_details_for_unchanged_ancestor():
+    tree = conditions.analyze_source(
+        """#if PARENT
+#if CHILD && CHILD
+#endif
+#endif
+"""
+    )
+
+    parent = conditions.tree_to_dict(tree, verbose=True)["groups"][0]["branches"][0]
+
+    assert parent["simplified_condition"] == "PARENT"
+    assert parent["contextual_condition"] == "PARENT"
+    assert parent["effective_condition"] == "PARENT"
 
 
 def test_default_report_includes_context_only_simplification():

@@ -1021,6 +1021,7 @@ def _branch_is_notable(branch: ConditionalBranch) -> bool:
 class _Visibility:
     branches: frozenset[int]
     groups: frozenset[int]
+    detailed_branches: frozenset[int]
 
 
 def _compute_visibility(tree: ConditionalTree, verbose: bool) -> _Visibility:
@@ -1028,14 +1029,18 @@ def _compute_visibility(tree: ConditionalTree, verbose: bool) -> _Visibility:
 
     visible_branches: set[int] = set()
     visible_groups: set[int] = set()
+    detailed_branches: set[int] = set()
 
     def visit_group(group: ConditionalGroup) -> bool:
         group_visible = False
         for branch in group.branches:
+            notable = _branch_is_notable(branch)
             child_visible = False
             for child in branch.children:
                 child_visible = visit_group(child) or child_visible
-            if verbose or _branch_is_notable(branch) or child_visible:
+            if verbose or notable:
+                detailed_branches.add(id(branch))
+            if verbose or notable or child_visible:
                 visible_branches.add(id(branch))
                 group_visible = True
         if group_visible:
@@ -1044,41 +1049,53 @@ def _compute_visibility(tree: ConditionalTree, verbose: bool) -> _Visibility:
 
     for group in tree.groups:
         visit_group(group)
-    return _Visibility(frozenset(visible_branches), frozenset(visible_groups))
+    return _Visibility(
+        frozenset(visible_branches),
+        frozenset(visible_groups),
+        frozenset(detailed_branches),
+    )
 
 
 def _branch_dict(
     branch: ConditionalBranch, visibility: _Visibility
 ) -> dict[str, object]:
     assert branch.analysis is not None
-    return {
+    result: dict[str, object] = {
         "directive": branch.directive,
         "line": branch.line,
         "condition": branch.expression_text,
         "status": branch.analysis.status,
-        "simplified_condition": (
-            format_expression(branch.analysis.simplified)
-            if branch.analysis.simplified is not None
-            else None
-        ),
-        "contextual_condition": (
-            format_expression(branch.analysis.contextual)
-            if branch.analysis.contextual is not None
-            else None
-        ),
-        "effective_condition": format_expression(branch.analysis.effective),
-        "reason": branch.analysis.reason,
-        "opaque_predicates": (
-            sorted(expression_predicates(branch.expression))
-            if branch.expression is not None
-            else []
-        ),
         "children": [
             _group_dict(group, visibility)
             for group in branch.children
             if id(group) in visibility.groups
         ],
     }
+    if id(branch) in visibility.detailed_branches:
+        result.update(
+            {
+                "simplified_condition": (
+                    format_expression(branch.analysis.simplified)
+                    if branch.analysis.simplified is not None
+                    else None
+                ),
+                "contextual_condition": (
+                    format_expression(branch.analysis.contextual)
+                    if branch.analysis.contextual is not None
+                    else None
+                ),
+                "effective_condition": format_expression(
+                    branch.analysis.effective
+                ),
+                "reason": branch.analysis.reason,
+                "opaque_predicates": (
+                    sorted(expression_predicates(branch.expression))
+                    if branch.expression is not None
+                    else []
+                ),
+            }
+        )
+    return result
 
 
 def _group_dict(group: ConditionalGroup, visibility: _Visibility) -> dict[str, object]:
@@ -1151,6 +1168,11 @@ def _text_lines(
                 f"[{branch.analysis.status}]"
             )
             yield _colored(header, _branch_color(branch), color)
+            if id(branch) not in visibility.detailed_branches:
+                yield from _text_lines(
+                    branch.children, visibility, depth + 1, color=color
+                )
+                continue
             if branch.analysis.reason:
                 reason = f"{'  ' * (depth + 1)}reason: {branch.analysis.reason}"
                 yield _colored(reason, _branch_color(branch), color)
