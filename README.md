@@ -63,7 +63,8 @@ are `.jpg`, `.jpeg`, and `.png`; generated files are JPEGs.
 
 Parses the conditional directives in a C/C++-style source file without
 processing the source code itself. It builds a nested tree from `#if`, `#elif`,
-`#else`, and `#endif` directives (with `#ifdef` and `#ifndef` support), then:
+`#else`, and `#endif` directives (with `#ifdef`, `#ifndef`, C23 `#elifdef`, and
+`#elifndef` support), then:
 
 - marks branches that can never be selected as `dead`;
 - marks conditions that are always true under parent and preceding-branch
@@ -115,6 +116,17 @@ Or emit the complete conditional tree as JSON:
 ```powershell
 py .\preprocessor_conditions.py .\source.c --json
 ```
+
+Pass multiple files to analyze them as a batch, or recursively scan a directory
+for `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, and `.hxx` files:
+
+```powershell
+py .\preprocessor_conditions.py --recursive .\src\ --json
+```
+
+Batch JSON contains a `files` array with each path and its conditional tree;
+batch text output labels each report with its path. A malformed or unreadable
+file returns status 2 after the remaining files have been analyzed.
 
 Use `--fail-on-findings` to return exit status 1 when a dead or redundant branch
 is found, which is useful in CI. Invalid directive structure or malformed

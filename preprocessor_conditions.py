@@ -12,9 +12,10 @@ import argparse
 import json
 import re
 import sys
+import typing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence, Union
+from typing import Iterable, Iterator, Sequence
 
 
 @dataclass(frozen=True)
@@ -36,28 +37,32 @@ class Predicate:
 
 @dataclass(frozen=True)
 class Negation:
-    operand: "Expression"
+    operand: Expression
 
 
 @dataclass(frozen=True)
 class Conjunction:
-    operands: tuple["Expression", ...]
+    operands: tuple[Expression, ...]
 
 
 @dataclass(frozen=True)
 class Disjunction:
-    operands: tuple["Expression", ...]
+    operands: tuple[Expression, ...]
 
 
-BooleanAtom = Union[Variable, Predicate]
-Expression = Union[Constant, Variable, Predicate, Negation, Conjunction, Disjunction]
+# Runtime aliases cannot use ``|`` until Python 3.10. Keep the documented
+# Python 3.9 support while using modern union syntax for postponed annotations.
+BooleanAtom = typing.Union[Variable, Predicate]
+Expression = typing.Union[
+    Constant, Variable, Predicate, Negation, Conjunction, Disjunction
+]
 TRUE = Constant(True)
 FALSE = Constant(False)
 
 
 @dataclass(frozen=True)
 class _SourceLocation:
-    line: Optional[int]
+    line: int | None
     column: int
 
 
@@ -75,7 +80,7 @@ class ExpressionSyntaxError(ConditionError):
     """Raised for a malformed Boolean expression."""
 
     def __init__(
-        self, message: str, *, location: Optional[_SourceLocation] = None
+        self, message: str, *, location: _SourceLocation | None = None
     ) -> None:
         self.message = message
         self.location = location
@@ -108,7 +113,7 @@ class _Token:
 
 
 def _tokens(
-    text: str, locations: Optional[Sequence[_SourceLocation]] = None
+    text: str, locations: Sequence[_SourceLocation] | None = None
 ) -> list[_Token]:
     if locations is not None and len(locations) != len(text):
         raise ValueError("source locations must correspond to every input character")
@@ -139,7 +144,7 @@ def _tokens(
 
 class _ExpressionParser:
     def __init__(
-        self, text: str, locations: Optional[Sequence[_SourceLocation]] = None
+        self, text: str, locations: Sequence[_SourceLocation] | None = None
     ):
         self.text = text
         self.tokens = _tokens(text, locations)
@@ -261,7 +266,7 @@ class _ExpressionParser:
         return False
 
     @staticmethod
-    def _parse_defined(tokens: Sequence[_Token]) -> Optional[Expression]:
+    def _parse_defined(tokens: Sequence[_Token]) -> Expression | None:
         if not tokens or tokens[0].kind != "identifier":
             return None
         if tokens[0].text != "defined":
@@ -296,7 +301,7 @@ class _ExpressionParser:
     @staticmethod
     def _normalize_predicate(tokens: Sequence[_Token]) -> str:
         parts: list[str] = []
-        previous: Optional[_Token] = None
+        previous: _Token | None = None
         for token in tokens:
             needs_space = previous is not None
             if token.kind == "rparen" or (
@@ -488,7 +493,7 @@ class _BDD:
         ordered_atoms = list(dict.fromkeys(atoms))
         self.order = {atom: index for index, atom in enumerate(ordered_atoms)}
         self.atoms = ordered_atoms
-        self.nodes: list[Optional[tuple[int, int, int]]] = [None, None]
+        self.nodes: list[tuple[int, int, int] | None] = [None, None]
         self.unique: dict[tuple[int, int, int], int] = {}
         self._apply_cache: dict[tuple[str, int, int], int] = {}
         self._not_cache: dict[int, int] = {0: 1, 1: 0}
@@ -696,16 +701,16 @@ def simplify_under(
 class ConditionalBranch:
     directive: str
     line: int
-    expression_text: Optional[str]
-    expression: Optional[Expression]
+    expression_text: str | None
+    expression: Expression | None
     children: list["ConditionalGroup"] = field(default_factory=list)
-    analysis: Optional["BranchAnalysis"] = None
+    analysis: BranchAnalysis | None = None
 
 
 @dataclass
 class ConditionalGroup:
     line: int
-    end_line: Optional[int] = None
+    end_line: int | None = None
     branches: list[ConditionalBranch] = field(default_factory=list)
 
 
@@ -717,13 +722,15 @@ class ConditionalTree:
 @dataclass(frozen=True)
 class BranchAnalysis:
     status: str
-    simplified: Optional[Expression]
-    contextual: Optional[Expression]
+    simplified: Expression | None
+    contextual: Expression | None
     effective: Expression
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
-_DIRECTIVE_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$")
+_DIRECTIVE_RE = re.compile(
+    r"^\s*#\s*(if|ifdef|ifndef|elif|elifdef|elifndef|else|endif)\b(.*)$"
+)
 
 
 def _strip_comments(source: str) -> str:
@@ -781,7 +788,7 @@ def _directive_expression(
     kind: str,
     remainder: str,
     line: int,
-    locations: Optional[Sequence[_SourceLocation]] = None,
+    locations: Sequence[_SourceLocation] | None = None,
 ) -> tuple[str, Expression]:
     text = remainder.strip()
     if locations is not None:
@@ -789,13 +796,13 @@ def _directive_expression(
         locations = locations[
             leading_space_count : leading_space_count + len(text)
         ]
-    if kind in {"ifdef", "ifndef"}:
+    if kind in {"ifdef", "ifndef", "elifdef", "elifndef"}:
         if not re.fullmatch(r"[A-Za-z_]\w*", text):
             raise ExpressionSyntaxError(
                 f"line {line}: #{kind} expects exactly one macro name"
             )
         expression: Expression = Variable(text)
-        if kind == "ifndef":
+        if kind in {"ifndef", "elifndef"}:
             expression = Negation(expression)
         return text, expression
     try:
@@ -839,9 +846,11 @@ def parse_source(source: str) -> ConditionalTree:
             raise DirectiveStructureError(f"line {line}: #{kind} has no matching #if")
         group, current = stack[-1]
 
-        if kind == "elif":
+        if kind in {"elif", "elifdef", "elifndef"}:
             if current.directive == "else":
-                raise DirectiveStructureError(f"line {line}: #elif appears after #else")
+                raise DirectiveStructureError(
+                    f"line {line}: #{kind} appears after #else"
+                )
             expression_text, expression = _directive_expression(
                 kind, remainder, line, remainder_locations
             )
@@ -1038,11 +1047,59 @@ def _has_findings(tree: ConditionalTree) -> bool:
     return False
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+_SOURCE_SUFFIXES = frozenset(
+    {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+)
+
+
+def _source_paths(inputs: Sequence[Path], recursive: bool) -> list[Path]:
+    """Expand files and, with ``recursive``, C/C++ source directories."""
+
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for input_path in inputs:
+        if input_path.is_file():
+            candidates = [input_path]
+        elif input_path.is_dir():
+            if not recursive:
+                raise ConditionError(
+                    f"{input_path}: is a directory; use --recursive to scan it"
+                )
+            candidates = sorted(
+                path
+                for path in input_path.rglob("*")
+                if path.is_file() and path.suffix.lower() in _SOURCE_SUFFIXES
+            )
+            if not candidates:
+                raise ConditionError(
+                    f"{input_path}: no C/C++ source files found recursively"
+                )
+        else:
+            raise ConditionError(f"{input_path}: no such file or directory")
+
+        for path in candidates:
+            identity = path.resolve()
+            if identity not in seen:
+                seen.add(identity)
+                paths.append(path)
+    return paths
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Analyze Boolean C/C++ preprocessor conditional directives."
     )
-    parser.add_argument("source", type=Path, help="C/C++-style source file to analyze")
+    parser.add_argument(
+        "sources",
+        nargs="+",
+        type=Path,
+        help="C/C++ source files, or directories used with --recursive",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="recursively scan C/C++ source files under directory inputs",
+    )
     parser.add_argument(
         "--json", action="store_true", help="write the conditional tree as JSON"
     )
@@ -1054,19 +1111,48 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        source = args.source.read_text(encoding="utf-8")
-        tree = analyze_source(source)
-    except OSError as error:
+        paths = _source_paths(args.sources, args.recursive)
+    except ConditionError as error:
         parser.error(str(error))
-    except (ConditionError, UnicodeDecodeError) as error:
-        print(f"{args.source}: {error}", file=sys.stderr)
-        return 2
 
+    results: list[tuple[Path, ConditionalTree]] = []
+    had_errors = False
+    for path in paths:
+        try:
+            source = path.read_text(encoding="utf-8")
+            results.append((path, analyze_source(source)))
+        except (OSError, ConditionError, UnicodeDecodeError) as error:
+            print(f"{path}: {error}", file=sys.stderr)
+            had_errors = True
+
+    batch_mode = len(args.sources) > 1 or any(path.is_dir() for path in args.sources)
     if args.json:
-        print(json.dumps(tree_to_dict(tree), indent=2))
-    else:
-        print(format_report(tree))
-    return 1 if args.fail_on_findings and _has_findings(tree) else 0
+        if batch_mode:
+            output = {
+                "files": [
+                    {"path": str(path), **tree_to_dict(tree)}
+                    for path, tree in results
+                ]
+            }
+        elif results:
+            output = tree_to_dict(results[0][1])
+        else:
+            output = None
+        if output is not None:
+            print(json.dumps(output, indent=2))
+    elif batch_mode:
+        reports = [
+            f"== {path} ==\n{format_report(tree)}" for path, tree in results
+        ]
+        if reports:
+            print("\n\n".join(reports))
+    elif results:
+        print(format_report(results[0][1]))
+
+    if had_errors:
+        return 2
+    has_findings = any(_has_findings(tree) for _, tree in results)
+    return 1 if args.fail_on_findings and has_findings else 0
 
 
 if __name__ == "__main__":
