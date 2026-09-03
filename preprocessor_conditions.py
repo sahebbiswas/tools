@@ -456,6 +456,18 @@ def expression_atoms(expression: Expression) -> set[BooleanAtom]:
     return result
 
 
+def _expression_atoms_in_order(expression: Expression) -> Iterator[BooleanAtom]:
+    """Yield atoms in their first-appearance order within an expression."""
+
+    if isinstance(expression, (Variable, Predicate)):
+        yield expression
+    elif isinstance(expression, Negation):
+        yield from _expression_atoms_in_order(expression.operand)
+    elif isinstance(expression, (Conjunction, Disjunction)):
+        for operand in expression.operands:
+            yield from _expression_atoms_in_order(operand)
+
+
 def expression_predicates(expression: Expression) -> set[str]:
     """Return the opaque value-bearing predicates in an expression."""
 
@@ -470,9 +482,10 @@ class _BDD:
     """Small dependency-free ROBDD engine used for exact logical queries."""
 
     def __init__(self, atoms: Iterable[BooleanAtom]):
-        ordered_atoms = sorted(
-            set(atoms), key=lambda atom: (format_expression(atom), type(atom).__name__)
-        )
+        # Callers provide atoms in source order. Keeping flags that occur near
+        # one another in an expression adjacent often avoids the exponential
+        # growth caused by a purely alphabetical order.
+        ordered_atoms = list(dict.fromkeys(atoms))
         self.order = {atom: index for index, atom in enumerate(ordered_atoms)}
         self.atoms = ordered_atoms
         self.nodes: list[Optional[tuple[int, int, int]]] = [None, None]
@@ -481,6 +494,22 @@ class _BDD:
         self._not_cache: dict[int, int] = {0: 1, 1: 0}
         self._build_cache: dict[Expression, int] = {}
         self._expression_cache: dict[int, Expression] = {0: FALSE, 1: TRUE}
+
+    def node_count(self, root: int) -> int:
+        """Return the number of non-terminal nodes reachable from ``root``."""
+
+        reachable: set[int] = set()
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            if node < 2 or node in reachable:
+                continue
+            reachable.add(node)
+            item = self.nodes[node]
+            assert item is not None
+            _, low, high = item
+            pending.extend((low, high))
+        return len(reachable)
 
     def _node(self, variable: int, low: int, high: int) -> int:
         if low == high:
@@ -854,9 +883,13 @@ def _tree_expressions(groups: Sequence[ConditionalGroup]) -> Iterator[Expression
 def analyze_tree(tree: ConditionalTree) -> ConditionalTree:
     """Annotate each branch with reachability and simplification results."""
 
-    atoms: set[BooleanAtom] = set()
+    atoms: list[BooleanAtom] = []
+    seen_atoms: set[BooleanAtom] = set()
     for expression in _tree_expressions(tree.groups):
-        atoms.update(expression_atoms(expression))
+        for atom in _expression_atoms_in_order(expression):
+            if atom not in seen_atoms:
+                seen_atoms.add(atom)
+                atoms.append(atom)
     bdd = _BDD(atoms)
 
     def analyze_groups(groups: Sequence[ConditionalGroup], parent: Expression) -> None:
