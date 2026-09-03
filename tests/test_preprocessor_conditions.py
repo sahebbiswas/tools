@@ -33,6 +33,35 @@ def test_exact_reported_simplification_handles_consensus_identity():
     assert conditions.format_expression(branch(tree).analysis.simplified) == "A"
 
 
+def test_bdd_variable_order_follows_first_appearance():
+    expression = conditions.parse_expression("Z && A && Z && M")
+    atoms = conditions._expression_atoms_in_order(expression)
+
+    bdd = conditions._BDD(atoms)
+
+    assert bdd.atoms == [
+        conditions.Variable("Z"),
+        conditions.Variable("A"),
+        conditions.Variable("M"),
+    ]
+
+
+def test_first_appearance_order_limits_synthetic_bdd_size():
+    # Pairwise equivalence has a linear ROBDD when each pair is adjacent, but
+    # the former alphabetical order grouped all uppercase and lowercase flags
+    # and produced 3,069 reachable nodes for ten pairs.
+    clauses = [
+        f"(({upper} && {lower}) || (!{upper} && !{lower}))"
+        for upper, lower in zip("ABCDEFGHIJ", "abcdefghij")
+    ]
+    expression = conditions.parse_expression(" && ".join(clauses))
+    bdd = conditions._BDD(conditions._expression_atoms_in_order(expression))
+
+    root = bdd.build(expression)
+
+    assert bdd.node_count(root) == 30
+
+
 def test_elif_shadowed_by_broader_if_is_dead():
     tree = conditions.analyze_source(
         """

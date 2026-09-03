@@ -84,6 +84,15 @@ For example, `VERSION >= 4` and `VERSION < 4` remain independent facts rather
 than being assumed to be complements. Macro expansion is also intentionally out
 of scope.
 
+The ROBDD engine orders flags and opaque predicates by first appearance in the
+source, rather than alphabetically. This deterministic-for-identical-input
+heuristic tends to keep related flags adjacent, although no static ordering is
+optimal for every Boolean function. In a synthetic conjunction of ten pairwise
+equivalences, such as `(A == a) && (B == b) && ...` expressed with supported
+Boolean operators, first-appearance ordering reduces the final reachable BDD
+from 3,069 non-terminal nodes to 30. The regression test records this case so a
+future ordering change cannot silently restore the exponential growth.
+
 For example, `VERSION >= 4` remains opaque here, but the nested `FOO` condition
 is reported as redundant:
 
