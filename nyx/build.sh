@@ -1,0 +1,5 @@
+mkdir build
+cd build
+cmake -DCMAKE_C_COMPILER=gcc-8 -DCMAKE_CXX_COMPILER=g++-8 -DCMAKE_BUILD_TYPE=${BUILDTYPE} ..
+cmake --build .
+./tool/nyx_test
