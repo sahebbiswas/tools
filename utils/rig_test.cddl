@@ -1,0 +1,107 @@
+; ============================================================================
+; CDDL TORTURE-TEST SCHEMA (RFC 8610 + RFC 9165 + CoRIM Patterns)
+; Entry Point:root-torture-manifest
+; ============================================================================
+
+root-torture-manifest = #6.501(torture-map)
+
+; --- 1. Generics & CoRIM Idioms (RFC 8610 §2.4 & RFC 9165 §3.1) ---
+one-or-more<T> = T / [ 2* T ]
+non-empty<M> = (M) .and ({ + any => any })
+
+; --- 2. Unwrapping (~) & Enumeration (&) (RFC 8610 §3.6, §3.7) ---
+base-header-group = (
+  version: uint .eq 1,
+  ? profile: tstr
+)
+
+unwrapped-array = [ ~base-header-group, payload-count: uint ]
+
+color-group = ( red: 1, green: 2, blue: 4, alpha: 8 )
+color-enum = &color-group ; Evaluates to 1 / 2 / 4 / 8
+
+; --- 3. Socket/Plug Extensibility (/= and //=) (RFC 8610 §3.9) ---
+; Defined BEFORE and AFTER usage to test two-pass AST symbol resolution
+$id-socket /= #6.37(bstr .size 16) ; UUID
+$id-socket /= uint .ge 1000
+
+torture-map = {
+  &(id: 0) ^ => one-or-more<$id-socket>,
+  &(header: 1) ^ => unwrapped-array,
+  &(controls: 2) ^ => control-showcase,
+  &(choices: 3) ^ => choice-and-cut-test,
+  &(embedded: 4) ^ => bstr .cbor inner-coid-tag,
+  ? &(optional-non-empty: 5) ^ => non-empty<sparse-flags-map>,
+  $$vendor-extension-group,
+  * int .lt 0 => any ; Catch-all ONLY for negative integer vendor keys
+}
+
+; Late socket plug definitions (tests out-of-order AST resolution)
+$id-socket /= tstr .regexp "^[a-z]{3}-[0-9]{4}$"
+
+$$vendor-extension-group //= (
+  ? &(ext-alpha: 100) => tstr .cat "v1"
+)
+$$vendor-extension-group //= (
+  ? &(ext-beta: 101) => uint .plus 10
+)
+
+; --- 4. Control Operators Showcase (RFC 8610 §3.8 & RFC 9165) ---
+flag-bits = ( r: 0, w: 1, x: 2, reserved-high: 7 )
+
+control-showcase = {
+  ; .bits on uint and bstr (only bits 0, 1, 2, 7 allowed -> mask 0x87)
+  uint-bits: uint .bits flag-bits,
+  bstr-bits: bstr .bits flag-bits,
+
+  ; .size on uint (byte width limit, <= 2 bytes -> 0..65535) vs bstr
+  bounded-uint: uint .size (1..2),
+  bounded-hash: bstr .size 32 / bstr .size 48,
+
+  ; Unbounded range equivalents (.ge, .lt, .ne)
+  svn-threshold: uint .ge 5,
+  temp-offset: int .lt 0,
+  non-zero: uint .ne 0,
+
+  ; RFC 9165 .within and .and
+  strict-color: uint .within color-enum,
+  even-small-int: (uint .le 10) .and (0 / 2 / 4 / 6 / 8 / 10),
+
+  ; .default constraint
+  ? retry-limit: uint .default 3,
+
+  ; .cborseq (sequence of concatenated CBOR items inside a single bstr)
+  encoded-seq: bstr .cborseq [ + (uint, tstr) ]
+}
+
+; --- 5. Cut Semantics (^) & Group Choice (//) Backtracking ---
+; Tests that once 'type: 1' matches, a bad 'val' CANNOT fall back to the catch-all
+choice-and-cut-test = {
+  (
+    type: 1,
+    val ^ => tstr ; CUT! If type==1 and val is uint, MUST FAIL (no fallback)
+  //
+    type: 2,
+    val ^ => uint
+  ),
+  * tstr => any ; Catch-all for extra string keys
+}
+
+; --- 6. Embedded CBOR (.cbor) & Tagged Structures (CoMID-style) ---
+inner-coid-tag = #6.570(inner-coid-map)
+
+inner-coid-map = {
+  1: [ tag-id: tstr, tag-version: uint ],
+  2: [ + environment-class ]
+}
+
+environment-class = {
+  ? 1: #6.111(bstr), ; OID tag
+  ? 2: tstr
+}
+
+sparse-flags-map = {
+  ? &(is-debug: 0): bool,
+  ? &(is-signed: 1): bool,
+  ? &(is-encrypted: 2): bool
+}
