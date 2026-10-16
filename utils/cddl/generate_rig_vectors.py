@@ -67,9 +67,10 @@ def build_valid_baseline() -> Any:
         # 0: id -> one-or-more<$id-socket> (using array of 2+ items across early & late plugs)
         0: [
             tag(37, b"\x12\x34" * 8),  # Early plug: UUID
-            "abc-9876"                   # Late plug: .regexp "^[a-z]{3}-[0-9]{4}$"
+            "abc-9876"                   # Late plug: .regexp "[a-z]{3}-[0-9]{4}" (XSD: whole text, no anchors)
         ],
-        # 1: header -> unwrapped-array [ version: 1, ? profile: tstr, payload-count: uint ]
+        # 1: header -> unwrapped-array [ ~base-header, payload-count: uint ],
+        #    i.e. [ version: 1, ? profile: tstr, payload-count: uint ]
         1: [1, "urn:ietf:rats:torture", 42],
         # 2: controls -> control-showcase
         2: {
@@ -94,7 +95,8 @@ def build_valid_baseline() -> Any:
         4: inner_coid_bstr,
         # 5: optional-non-empty -> non-empty<sparse-flags-map>
         5: {0: True},
-        # 101: $$vendor-extension-group -> uint .plus 10 (0 + 10 = 10)
+        # 101: $$vendor-extension-group -> 0 .plus 10 (the literal 10). The group socket is a
+        # choice, so key 100 ("x" .cat "v1" == "xv1") must NOT appear together with 101.
         101: 10,
         # Negative vendor extension key allowed by * int .lt 0 => any
         -1: "custom-vendor-val"
@@ -125,10 +127,10 @@ def build_negative_vectors() -> Dict[str, Tuple[str, Any]]:
     v3 = build_valid_baseline()
     v3[1][1][3] = {
         "type": 1,
-        "val": 12345  # Invalid! type==1 requires tstr. Cut (^) forbids falling back to * tstr => any
+        "val": 12345  # Invalid! type==1 requires tstr. The implicit cut of 'val:' forbids falling back to * tstr => any
     }
     vectors["neg_03_cut_prevents_wildcard_fallback"] = (
-        "Must fail: 'val' has cut (^); uint 12345 cannot fall back to * tstr => any",
+        "Must fail: 'val:' implies a cut; uint 12345 cannot fall back to * tstr => any",
         v3
     )
 
@@ -165,11 +167,11 @@ def build_negative_vectors() -> Dict[str, Tuple[str, Any]]:
         v7
     )
 
-    # 8. Unwrapped Group (~) Order/Arity Violation
+    # 8. Unwrapped array (~base-header) value violation
     v8 = build_valid_baseline()
     v8[1][1][1] = [2, "urn:profile", 10]  # version is 2, violates version: uint .eq 1
-    vectors["neg_08_unwrapped_group_eq_violation"] = (
-        "Must fail: Unwrapped header group version is 2, violating .eq 1",
+    vectors["neg_08_unwrapped_array_eq_violation"] = (
+        "Must fail: Unwrapped base-header version is 2, violating .eq 1",
         v8
     )
 

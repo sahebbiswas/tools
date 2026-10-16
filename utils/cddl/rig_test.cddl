@@ -10,12 +10,14 @@ one-or-more<T> = T / [ 2* T ]
 non-empty<M> = (M) .and ({ + any => any })
 
 ; --- 2. Unwrapping (~) & Enumeration (&) (RFC 8610 §3.6, §3.7) ---
-base-header-group = (
+; '~' unwraps a map, array or tag TYPE (RFC 8610 §3.7), not a group name,
+; so the header is an array type whose entries are spliced into the outer array.
+base-header = [
   version: uint .eq 1,
   ? profile: tstr
-)
+]
 
-unwrapped-array = [ ~base-header-group, payload-count: uint ]
+unwrapped-array = [ ~base-header, payload-count: uint ]
 
 color-group = ( red: 1, green: 2, blue: 4, alpha: 8 )
 color-enum = &color-group ; Evaluates to 1 / 2 / 4 / 8
@@ -37,13 +39,18 @@ torture-map = {
 }
 
 ; Late socket plug definitions (tests out-of-order AST resolution)
-$id-socket /= tstr .regexp "^[a-z]{3}-[0-9]{4}$"
+; .regexp is an XSD regular expression (RFC 8610 §3.8.3): it matches the whole
+; text, and '^' / '$' are ordinary characters, so no anchors are written.
+$id-socket /= tstr .regexp "[a-z]{3}-[0-9]{4}"
 
+; .cat and .plus compute literals (RFC 9165 §2): "x" .cat "v1" is "xv1" and
+; 0 .plus 10 is 10. The group socket is a choice, so only one of the two
+; extension keys can be present.
 $$vendor-extension-group //= (
-  ? &(ext-alpha: 100) => tstr .cat "v1"
+  ? &(ext-alpha: 100) => "x" .cat "v1"
 )
 $$vendor-extension-group //= (
-  ? &(ext-beta: 101) => uint .plus 10
+  ? &(ext-beta: 101) => 0 .plus 10
 )
 
 ; --- 4. Control Operators Showcase (RFC 8610 §3.8 & RFC 9165) ---
@@ -51,8 +58,9 @@ flag-bits = ( r: 0, w: 1, x: 2, reserved-high: 7 )
 
 control-showcase = {
   ; .bits on uint and bstr (only bits 0, 1, 2, 7 allowed -> mask 0x87)
-  uint-bits: uint .bits flag-bits,
-  bstr-bits: bstr .bits flag-bits,
+  ; the controller is an enumeration (&), which gives the allowed bit positions
+  uint-bits: uint .bits &flag-bits,
+  bstr-bits: bstr .bits &flag-bits,
 
   ; .size on uint (byte width limit, <= 2 bytes -> 0..65535) vs bstr
   bounded-uint: uint .size (1..2),
@@ -75,14 +83,16 @@ control-showcase = {
 }
 
 ; --- 5. Cut Semantics (^) & Group Choice (//) Backtracking ---
-; Tests that once 'type: 1' matches, a bad 'val' CANNOT fall back to the catch-all
+; Tests that once 'type: 1' matches, a bad 'val' CANNOT fall back to the catch-all.
+; A bareword key ('val:') already implies the cut; 'val ^ => T' would instead
+; name a type called 'val'.
 choice-and-cut-test = {
   (
     type: 1,
-    val ^ => tstr ; CUT! If type==1 and val is uint, MUST FAIL (no fallback)
+    val: tstr ; CUT! If type==1 and val is uint, MUST FAIL (no fallback)
   //
     type: 2,
-    val ^ => uint
+    val: uint
   ),
   * tstr => any ; Catch-all for extra string keys
 }
@@ -100,8 +110,9 @@ environment-class = {
   ? 2: tstr
 }
 
+; An enumeration is a type, so its member key is followed by '=>', not ':'.
 sparse-flags-map = {
-  ? &(is-debug: 0): bool,
-  ? &(is-signed: 1): bool,
-  ? &(is-encrypted: 2): bool
+  ? &(is-debug: 0) => bool,
+  ? &(is-signed: 1) => bool,
+  ? &(is-encrypted: 2) => bool
 }
